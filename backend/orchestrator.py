@@ -7,13 +7,12 @@ import time
 import secrets
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from sqlalchemy.orm import Session
 
 from backend.engines.poi_engine import poi_engine
 from backend.engines.pouw_engine import pouw_engine
 from backend.engines.evidence_generator import EvidenceBundleGenerator
 from backend.config import settings
-from backend.database import get_db_session
+from backend.database import get_db_context
 from backend.models import Agent, Audit
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ class AuditOrchestrator:
         
         try:
             # Ensure agent exists in database
-            await self._ensure_agent_exists(agent_id, agent_name)
+            self._ensure_agent_exists(agent_id, agent_name)  # REMOVED await
             
             # Step 1: Build the full prompt for the agent
             full_prompt = self._build_agent_prompt(task_description, task_input)
@@ -64,9 +63,13 @@ class AuditOrchestrator:
             
             if not poi_result.get('passed') or not poi_result.get('consensus_output'):
                 logger.error(f"[{audit_id}] PoI validation failed")
-                return await self._create_failed_result(
+                return self._create_failed_result(  # REMOVED await
                     audit_id=audit_id,
                     agent_id=agent_id,
+                    agent_name=agent_name,
+                    task_description=task_description,
+                    task_input=task_input,
+                    category=category,
                     error="PoI validation failed - inconsistent or no responses",
                     poi_result=poi_result
                 )
@@ -117,16 +120,18 @@ class AuditOrchestrator:
             )
             
             # Step 6: Save audit to database
-            await self._save_audit(
+            self._save_audit(  # REMOVED await
                 audit_id=audit_id,
                 agent_id=agent_id,
+                agent_name=agent_name,
                 task_description=task_description,
                 task_input=task_input,
-                agent_output=agent_output,
+                category=category,
                 poi_similarity=poi_similarity,
                 pouw_score=pouw_score,
                 confidence_score=confidence_score,
                 status="completed",
+                ipfs_cid=evidence.get('ipfs_cid'),
                 evidence_hash=evidence.get('bundle_hash')
             )
             
@@ -140,15 +145,20 @@ class AuditOrchestrator:
                 "confidence_score": confidence_score,
                 "poi_similarity": poi_similarity,
                 "pouw_mean_score": pouw_score,
-                "ipfs_hash": evidence.get('ipfs_cid'),
+                "ipfs_cid": evidence.get('ipfs_cid'),
+                "timestamp": datetime.utcnow().isoformat(),
                 "elapsed_time": elapsed_time
             }
             
         except Exception as e:
             logger.error(f"[{audit_id}] Audit failed: {str(e)}", exc_info=True)
-            return await self._create_failed_result(
+            return self._create_failed_result(  # REMOVED await
                 audit_id=audit_id,
                 agent_id=agent_id,
+                agent_name=agent_name,
+                task_description=task_description,
+                task_input=task_input,
+                category=category,
                 error=str(e)
             )
     
@@ -165,83 +175,83 @@ Please provide your response:"""
 
 Please provide your response:"""
     
-    async def _ensure_agent_exists(self, agent_id: str, agent_name: Optional[str]):
+    def _ensure_agent_exists(self, agent_id: str, agent_name: Optional[str]):  # REMOVED async
         """Ensure agent exists in database"""
-        with get_db_session() as db:
+        with get_db_context() as db:
             agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
             if not agent:
                 agent = Agent(
                     agent_id=agent_id,
-                    name=agent_name or agent_id,
-                    total_audits=0,
-                    passed_audits=0,
-                    average_confidence=0.0
+                    name=agent_name or agent_id
                 )
                 db.add(agent)
-                db.commit()
+                # Commit is handled by context manager
     
-    async def _save_audit(
+    def _save_audit(  # REMOVED async
         self,
         audit_id: str,
         agent_id: str,
+        agent_name: Optional[str],
         task_description: str,
         task_input: str,
-        agent_output: str,
+        category: str,
         poi_similarity: float,
         pouw_score: float,
         confidence_score: float,
         status: str,
+        ipfs_cid: Optional[str] = None,
         evidence_hash: Optional[str] = None
     ):
         """Save audit to database"""
-        with get_db_session() as db:
+        with get_db_context() as db:
             audit = Audit(
                 audit_id=audit_id,
                 agent_id=agent_id,
+                agent_name=agent_name,
                 task_description=task_description,
                 task_input=task_input,
-                agent_output=agent_output[:2000] if agent_output else None,
+                category=category,
                 poi_similarity=poi_similarity,
-                pouw_score=pouw_score,
-                confidence_score=confidence_score,
+                pouw_mean_score=pouw_score,
+                final_confidence=confidence_score,
                 status=status,
-                evidence_hash=evidence_hash
+                ipfs_cid=ipfs_cid,
+                evidence_hash=evidence_hash,
+                timestamp=datetime.utcnow(),
+                completed_at=datetime.utcnow() if status == "completed" else None
             )
             db.add(audit)
-            
-            # Update agent stats
-            agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
-            if agent:
-                agent.total_audits += 1
-                if confidence_score >= 0.7:
-                    agent.passed_audits += 1
-                # Update average confidence
-                if agent.total_audits > 0:
-                    agent.average_confidence = (
-                        (agent.average_confidence * (agent.total_audits - 1) + confidence_score) 
-                        / agent.total_audits
-                    )
-            
-            db.commit()
+            # Commit handled by context manager
     
-    async def _create_failed_result(
+    def _create_failed_result(  # REMOVED async
         self,
         audit_id: str,
         agent_id: str,
+        agent_name: Optional[str],
+        task_description: str,
+        task_input: str,
+        category: str,
         error: str,
         poi_result: Dict = None
     ) -> Dict[str, Any]:
         """Create a failed audit result"""
         # Save failed audit to database
-        with get_db_session() as db:
+        with get_db_context() as db:
             audit = Audit(
                 audit_id=audit_id,
                 agent_id=agent_id,
+                agent_name=agent_name,
+                task_description=task_description,
+                task_input=task_input,
+                category=category,
                 status="failed",
-                confidence_score=0.0
+                final_confidence=0.0,
+                poi_similarity=poi_result.get('similarity_score', 0.0) if poi_result else 0.0,
+                pouw_mean_score=0.0,
+                timestamp=datetime.utcnow()
             )
             db.add(audit)
-            db.commit()
+            # Commit handled by context manager
         
         return {
             "audit_id": audit_id,
@@ -250,12 +260,13 @@ Please provide your response:"""
             "error": error,
             "confidence_score": 0.0,
             "poi_similarity": poi_result.get('similarity_score', 0.0) if poi_result else 0.0,
-            "pouw_mean_score": 0.0
+            "pouw_mean_score": 0.0,
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     async def get_audit_status(self, audit_id: str) -> Dict[str, Any]:
         """Get audit status and results"""
-        with get_db_session() as db:
+        with get_db_context() as db:
             audit = db.query(Audit).filter(Audit.audit_id == audit_id).first()
             if not audit:
                 raise ValueError(f"Audit {audit_id} not found")
@@ -264,83 +275,11 @@ Please provide your response:"""
                 "audit_id": audit.audit_id,
                 "agent_id": audit.agent_id,
                 "status": audit.status,
-                "confidence_score": audit.confidence_score,
+                "confidence_score": audit.final_confidence,
                 "poi_similarity": audit.poi_similarity,
-                "pouw_score": audit.pouw_score,
-                "created_at": audit.created_at.isoformat() if audit.created_at else None
+                "pouw_score": audit.pouw_mean_score,
+                "timestamp": audit.timestamp.isoformat() if audit.timestamp else None
             }
-    
-    async def get_agent_reputation(self, agent_id: str) -> Dict[str, Any]:
-        """Get reputation score for an agent"""
-        with get_db_session() as db:
-            agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
-            if not agent:
-                raise ValueError(f"Agent {agent_id} not found")
-            
-            # Calculate reputation score
-            if agent.total_audits > 0:
-                pass_rate = agent.passed_audits / agent.total_audits
-                reputation = (pass_rate * 0.4) + (agent.average_confidence * 0.6)
-            else:
-                reputation = 0.0
-            
-            return {
-                "agent_id": agent.agent_id,
-                "agent_name": agent.name,
-                "total_audits": agent.total_audits,
-                "passed_audits": agent.passed_audits,
-                "average_confidence": agent.average_confidence,
-                "reputation_score": reputation
-            }
-    
-    async def list_agents(self, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-        """List all agents with their reputation"""
-        with get_db_session() as db:
-            agents = db.query(Agent).offset(offset).limit(limit).all()
-            
-            results = []
-            for agent in agents:
-                if agent.total_audits > 0:
-                    pass_rate = agent.passed_audits / agent.total_audits
-                    reputation = (pass_rate * 0.4) + (agent.average_confidence * 0.6)
-                else:
-                    reputation = 0.0
-                
-                results.append({
-                    "agent_id": agent.agent_id,
-                    "agent_name": agent.name,
-                    "total_audits": agent.total_audits,
-                    "passed_audits": agent.passed_audits,
-                    "average_confidence": agent.average_confidence,
-                    "reputation_score": reputation
-                })
-            
-            return results
-    
-    async def list_audits(
-        self, 
-        limit: int = 10, 
-        offset: int = 0, 
-        status: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """List all audits"""
-        with get_db_session() as db:
-            query = db.query(Audit)
-            if status:
-                query = query.filter(Audit.status == status)
-            
-            audits = query.order_by(Audit.created_at.desc()).offset(offset).limit(limit).all()
-            
-            return [
-                {
-                    "audit_id": a.audit_id,
-                    "agent_id": a.agent_id,
-                    "status": a.status,
-                    "confidence_score": a.confidence_score,
-                    "created_at": a.created_at.isoformat() if a.created_at else None
-                }
-                for a in audits
-            ]
 
 
 # Global orchestrator instance
