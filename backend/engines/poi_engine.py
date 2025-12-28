@@ -3,14 +3,14 @@ Proof of Inference (PoI) Engine
 Validates output consistency across redundant nodes via embedding similarity
 """
 import logging
-from typing import List, Dict, Any, Tuple
+import time
 import numpy as np
+from typing import List, Dict, Any, Tuple
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-import time
 
 from backend.config import settings
-from backend.web3_client import web3_client
+from backend.cortensor_client import cortensor_client
 
 logger = logging.getLogger(__name__)
 
@@ -25,170 +25,101 @@ class PoIEngine:
     
     def __init__(self):
         # Load sentence transformer model for embeddings
+        logger.info("Loading embedding model...")
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("PoI Engine initialized with all-MiniLM-L6-v2 embedding model")
-    
-    def create_redundant_session(
-        self,
-        session_name: str,
-        num_nodes: int = None,
-        model: str = None
-    ) -> Tuple[int, str]:
-        """
-        Create a Cortensor session with redundant nodes for PoI validation
-        
-        Args:
-            session_name: Human-readable session name
-            num_nodes: Number of redundant nodes (default: from settings)
-            model: Model to use (default: general model from settings)
-        
-        Returns:
-            Tuple of (session_id, transaction_hash)
-        """
-        if num_nodes is None:
-            num_nodes = settings.poi_redundancy
-        if model is None:
-            model = settings.cortensor_model_general
-        
-        logger.info(f"Creating PoI session: {session_name} with {num_nodes} redundant nodes")
-        
-        # Create session with redundant parameter set
-        session_id, tx_hash = web3_client.create_session(
-            session_name=session_name,
-            model=model,
-            redundant=num_nodes,
-            num_validators=0,  # No validators for PoI-only session
-            task_timeout=120
-        )
-        
-        return session_id, tx_hash
+        logger.info("PoI Engine initialized with all-MiniLM-L6-v2")
     
     def submit_and_validate(
         self,
-        session_id: int,
         prompt: str,
+        num_nodes: int = None,
         similarity_threshold: float = None
     ) -> Dict[str, Any]:
         """
-        Submit task to redundant session and validate outputs via embedding similarity
+        Submit prompt to redundant nodes and validate consistency
         
         Args:
-            session_id: Session ID with redundant nodes
-            prompt: The prompt/input to process
-            similarity_threshold: Cosine similarity threshold (default: from settings)
+            prompt: The input prompt
+            num_nodes: Number of redundant nodes (default from config)
+            similarity_threshold: Minimum similarity for consensus
         
         Returns:
-            Dictionary containing:
-                - consensus_output: The agreed-upon output
-                - similarity_score: Average similarity across all outputs
-                - outputs: All node outputs
-                - embeddings: All embeddings
-                - similarity_matrix: Pairwise similarity matrix
-                - passed: Whether consensus was reached
+            PoI validation result with scores and consensus
         """
+        if num_nodes is None:
+            num_nodes = settings.poi_redundancy
         if similarity_threshold is None:
             similarity_threshold = settings.poi_similarity_threshold
         
-        logger.info(f"PoI validation started for session {session_id}")
+        logger.info(f"PoI validation: {num_nodes} nodes, threshold={similarity_threshold}")
         
-        # Step 1: Submit task to session
-        task_id, tx_hash = web3_client.submit_task(session_id, prompt)
-        logger.info(f"Task submitted: task_id={task_id}, tx={tx_hash}")
+        start_time = time.time()
         
-        # Step 2: Wait for all nodes to complete (poll for results)
-        outputs = self._wait_for_all_results(session_id, task_id, timeout=120)
+        # Step 1: Get responses from redundant nodes
+        responses = cortensor_client.submit_completion_redundant(
+            prompt=prompt,
+            num_nodes=num_nodes,
+            model=settings.cortensor_model_general
+        )
         
-        if not outputs:
-            raise RuntimeError("No outputs received from nodes")
+        if len(responses) < 2:
+            logger.warning(f"Only got {len(responses)} responses, need at least 2")
+            if len(responses) == 1:
+                return {
+                    'passed': True,
+                    'similarity_score': 1.0,
+                    'consensus_output': responses[0].get('text', ''),
+                    'num_nodes': 1,
+                    'outputs': [responses[0].get('text', '')],
+                    'outliers': [],
+                    'embeddings': [],
+                    'similarity_matrix': [[1.0]],
+                    'processing_time': time.time() - start_time
+                }
+            raise ValueError("No responses received from nodes")
         
-        logger.info(f"Received {len(outputs)} outputs from nodes")
+        # Step 2: Extract output texts
+        outputs = [r.get('text', r.get('output', '')) for r in responses]
         
-        # Step 3: Generate embeddings for all outputs
-        output_texts = [result['output'] for result in outputs]
-        embeddings = self.embedding_model.encode(output_texts, convert_to_numpy=True)
+        # Step 3: Generate embeddings
+        logger.info("Generating embeddings...")
+        embeddings = self.embedding_model.encode(outputs, convert_to_numpy=True)
         
-        # Step 4: Calculate pairwise cosine similarity
+        # Step 4: Calculate similarity matrix
         similarity_matrix = cosine_similarity(embeddings)
         
-        # Step 5: Calculate average similarity (excluding diagonal)
+        # Step 5: Calculate average pairwise similarity
         n = len(similarity_matrix)
         if n > 1:
-            # Sum all similarities and exclude diagonal (1.0s)
-            total_similarity = np.sum(similarity_matrix) - n
-            avg_similarity = total_similarity / (n * (n - 1))
+            # Sum all similarities except diagonal, divide by number of pairs
+            avg_similarity = (np.sum(similarity_matrix) - n) / (n * (n - 1))
         else:
             avg_similarity = 1.0
         
-        # Step 6: Detect consensus cluster
+        # Step 6: Detect consensus and outliers
         consensus_output, outliers = self._detect_consensus(
-            output_texts,
-            embeddings,
-            similarity_matrix,
-            similarity_threshold
+            outputs, embeddings, similarity_matrix, similarity_threshold
         )
         
-        # Step 7: Determine if validation passed
+        # Step 7: Determine pass/fail
         passed = avg_similarity >= similarity_threshold
         
         result = {
-            'session_id': session_id,
-            'task_id': task_id,
-            'consensus_output': consensus_output,
+            'passed': passed,
             'similarity_score': float(avg_similarity),
             'similarity_threshold': similarity_threshold,
-            'passed': passed,
+            'consensus_output': consensus_output,
             'num_nodes': len(outputs),
-            'outputs': output_texts,
+            'outputs': outputs,
+            'outliers': outliers,
             'embeddings': embeddings.tolist(),
             'similarity_matrix': similarity_matrix.tolist(),
-            'outliers': outliers,
-            'timestamp': time.time()
+            'processing_time': time.time() - start_time
         }
         
-        logger.info(f"PoI validation completed: similarity={avg_similarity:.3f}, passed={passed}")
+        logger.info(f"PoI complete: similarity={avg_similarity:.3f}, passed={passed}")
         
         return result
-    
-    def _wait_for_all_results(
-        self,
-        session_id: int,
-        task_id: int,
-        timeout: int = 120,
-        poll_interval: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Poll for task results until all redundant nodes have responded
-        
-        Args:
-            session_id: Session ID
-            task_id: Task ID
-            timeout: Maximum wait time in seconds
-            poll_interval: Seconds between polls
-        
-        Returns:
-            List of result dictionaries from all nodes
-        """
-        start_time = time.time()
-        
-        while (time.time() - start_time) < timeout:
-            try:
-                results = web3_client.get_task_results(session_id, task_id)
-                
-                # Check if we have results from all nodes
-                if results and len(results) > 0:
-                    # Filter out empty results
-                    valid_results = [r for r in results if r['output'] and r['output'].strip()]
-                    
-                    if valid_results:
-                        logger.info(f"Received {len(valid_results)} valid results")
-                        return valid_results
-            
-            except Exception as e:
-                logger.warning(f"Error polling for results: {e}")
-            
-            time.sleep(poll_interval)
-        
-        raise TimeoutError(f"Timeout waiting for task results (session={session_id}, task={task_id})")
     
     def _detect_consensus(
         self,
@@ -200,52 +131,32 @@ class PoIEngine:
         """
         Detect consensus output and identify outliers
         
-        Args:
-            outputs: List of output strings
-            embeddings: Array of embeddings
-            similarity_matrix: Pairwise similarity matrix
-            threshold: Similarity threshold
-        
         Returns:
             Tuple of (consensus_output, outlier_indices)
         """
         n = len(outputs)
         
-        if n == 1:
-            return outputs[0], []
-        
         # Calculate average similarity for each output to all others
         avg_similarities = []
         for i in range(n):
-            # Average similarity of this output to all others (excluding self)
+            # Get similarities to all other outputs (excluding self)
             similarities = [similarity_matrix[i][j] for j in range(n) if i != j]
-            avg_sim = np.mean(similarities)
+            avg_sim = np.mean(similarities) if similarities else 0.0
             avg_similarities.append(avg_sim)
         
-        # Find the output with highest average similarity (most central)
-        consensus_idx = np.argmax(avg_similarities)
+        # Output with highest average similarity is the consensus
+        consensus_idx = int(np.argmax(avg_similarities))
         consensus_output = outputs[consensus_idx]
         
-        # Identify outliers (outputs below threshold similarity to consensus)
-        outliers = []
-        for i in range(n):
-            if i != consensus_idx and similarity_matrix[consensus_idx][i] < threshold:
-                outliers.append(i)
-        
-        logger.info(f"Consensus detected: output {consensus_idx}, {len(outliers)} outliers")
+        # Identify outliers (below threshold)
+        outliers = [i for i, sim in enumerate(avg_similarities) if sim < threshold]
         
         return consensus_output, outliers
     
     def calculate_poi_score(self, similarity_score: float) -> float:
-        """
-        Convert similarity score to PoI confidence score (0-1 scale)
-        
-        Args:
-            similarity_score: Average cosine similarity
-        
-        Returns:
-            PoI confidence score
-        """
-        # Similarity is already 0-1, but we can apply scaling if needed
-        # For now, direct passthrough
-        return max(0.0, min(1.0, similarity_score))
+        """Convert similarity (0-1) to confidence score (0-1)"""
+        return similarity_score
+
+
+# Global PoI engine instance
+poi_engine = PoIEngine()

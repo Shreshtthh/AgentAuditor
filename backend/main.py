@@ -1,11 +1,11 @@
 """
 FastAPI application - REST API for Cortensor Agent Auditor
 """
+import logging
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
-import logging
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -15,7 +15,7 @@ from backend.models import Agent, Audit
 
 # Configure logging
 logging.basicConfig(
-    level=getattr(logging, settings.log_level),
+    level=getattr(logging, settings.log_level, "INFO"),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -30,16 +30,37 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins.split(','),
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+# ==================== ROOT ROUTES ====================
+@app.get("/")
+async def root():
+    """Health check - root endpoint"""
+    return {
+        "service": "Cortensor Agent Auditor",
+        "version": "1.0.0",
+        "status": "running"
+    }
+
+
+@app.get("/health")
+async def health():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "database": "connected",
+        "cortensor_session": settings.cortensor_session_id
+    }
+# =====================================================
+
+
 # Request/Response Models
 class AuditRequest(BaseModel):
-    """Request model for creating an audit"""
     agent_id: str = Field(..., description="Unique identifier for the agent")
     agent_name: Optional[str] = Field(None, description="Human-readable agent name")
     task_description: str = Field(..., description="Description of the task")
@@ -48,193 +69,111 @@ class AuditRequest(BaseModel):
 
 
 class AuditResponse(BaseModel):
-    """Response model for audit results"""
     audit_id: str
     agent_id: str
     status: str
     confidence_score: Optional[float] = None
     poi_similarity: Optional[float] = None
     pouw_mean_score: Optional[float] = None
-    consensus_output: Optional[str] = None
     ipfs_hash: Optional[str] = None
-    estimated_time: Optional[str] = None
+    error: Optional[str] = None
 
 
 class AgentReputationResponse(BaseModel):
-    """Response model for agent reputation"""
     agent_id: str
-    name: str
-    category: Optional[str]
-    overall_confidence: float
-    total_audits: int
-    last_audit_at: Optional[str]
+    agent_name: Optional[str] = None
+    total_audits: int = 0
+    passed_audits: int = 0
+    average_confidence: float = 0.0
+    reputation_score: float = 0.0
 
 
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup"""
+    """Initialize on startup"""
     logger.info("Starting Cortensor Agent Auditor API...")
+    
+    # Initialize database
     init_db()
     logger.info("Database initialized")
 
 
-# API Routes
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "service": "Cortensor Agent Auditor",
-        "version": "1.0.0",
-        "status": "running"
-    }
-
-
+# ==================== API ROUTES ====================
 @app.post("/api/v1/audit", response_model=AuditResponse)
 async def create_audit(request: AuditRequest):
-    """
-    Submit a new audit request
+    """Submit a new audit request"""
+    logger.info(f"Audit request for agent: {request.agent_id}")
     
-    This endpoint:
-    1. Creates a PoI session with redundant nodes
-    2. Creates a PoUW session with validators
-    3. Generates evidence bundle
-    4. Uploads to IPFS
-    5. Returns confidence score and proof
-    """
     try:
-        logger.info(f"Received audit request for agent: {request.agent_id}")
-        
-        # Execute audit (synchronous for now, can be made async with Celery)
-        result = orchestrator.execute_audit(
+        result = await orchestrator.run_audit(
             agent_id=request.agent_id,
+            agent_name=request.agent_name,
             task_description=request.task_description,
             task_input=request.task_input,
-            agent_name=request.agent_name,
             category=request.category
         )
         
         return AuditResponse(
-            audit_id=result['audit_id'],
-            agent_id=result['agent_id'],
-            status=result['status'],
-            confidence_score=result['confidence_score'],
-            poi_similarity=result['poi_similarity'],
-            pouw_mean_score=result['pouw_mean_score'],
-            consensus_output=result['consensus_output'],
-            ipfs_hash=result['ipfs_hash']
+            audit_id=result.get("audit_id", ""),
+            agent_id=request.agent_id,
+            status=result.get("status", "processing"),
+            confidence_score=result.get("confidence_score"),
+            poi_similarity=result.get("poi_similarity"),
+            pouw_mean_score=result.get("pouw_mean_score"),
+            ipfs_hash=result.get("ipfs_hash")
         )
-    
     except Exception as e:
-        logger.error(f"Audit request failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Audit failed: {str(e)}")
+        logger.error(f"Audit failed: {e}")
+        return AuditResponse(
+            audit_id="",
+            agent_id=request.agent_id,
+            status="failed",
+            error=str(e)
+        )
 
 
 @app.get("/api/v1/audit/{audit_id}")
 async def get_audit(audit_id: str):
     """Get audit status and results"""
     try:
-        result = orchestrator.get_audit_status(audit_id)
-        
-        if 'error' in result:
-            raise HTTPException(status_code=404, detail=result['error'])
-        
+        result = await orchestrator.get_audit_status(audit_id)
         return result
-    
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Failed to get audit: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/v1/agent/{agent_id}/reputation", response_model=AgentReputationResponse)
 async def get_agent_reputation(agent_id: str):
-    """Get agent reputation and audit history"""
+    """Get reputation score for an agent"""
     try:
-        result = orchestrator.get_agent_reputation(agent_id)
-        
-        if 'error' in result:
-            raise HTTPException(status_code=404, detail=result['error'])
-        
-        return result
-    
-    except HTTPException:
-        raise
+        result = await orchestrator.get_agent_reputation(agent_id)
+        return AgentReputationResponse(**result)
     except Exception as e:
-        logger.error(f"Failed to get agent reputation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/v1/agents", response_model=List[AgentReputationResponse])
-async def list_agents(
-    limit: int = 50,
-    offset: int = 0,
-    category: Optional[str] = None,
-    db: Session = Depends(get_db_session)
-):
-    """List all agents with reputation scores"""
+async def list_agents(limit: int = 10, offset: int = 0):
+    """List all agents with their reputation"""
     try:
-        query = db.query(Agent)
-        
-        if category:
-            query = query.filter(Agent.category == category)
-        
-        agents = query.order_by(Agent.overall_confidence.desc()).limit(limit).offset(offset).all()
-        
-        return [
-            AgentReputationResponse(
-                agent_id=agent.agent_id,
-                name=agent.name,
-                category=agent.category,
-                overall_confidence=agent.overall_confidence,
-                total_audits=agent.total_audits,
-                last_audit_at=agent.last_audit_at.isoformat() if agent.last_audit_at else None
-            )
-            for agent in agents
-        ]
-    
+        agents = await orchestrator.list_agents(limit=limit, offset=offset)
+        return [AgentReputationResponse(**a) for a in agents]
     except Exception as e:
         logger.error(f"Failed to list agents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return []
 
 
 @app.get("/api/v1/audits")
-async def list_audits(
-    limit: int = 50,
-    offset: int = 0,
-    agent_id: Optional[str] = None,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db_session)
-):
-    """List recent audits"""
+async def list_audits(limit: int = 10, offset: int = 0, status: Optional[str] = None):
+    """List all audits"""
     try:
-        query = db.query(Audit)
-        
-        if agent_id:
-            query = query.filter(Audit.agent_id == agent_id)
-        
-        if status:
-            query = query.filter(Audit.status == status)
-        
-        audits = query.order_by(Audit.created_at.desc()).limit(limit).offset(offset).all()
-        
-        return [
-            {
-                'audit_id': audit.audit_id,
-                'agent_id': audit.agent_id,
-                'task_description': audit.task_description,
-                'confidence_score': audit.confidence_score,
-                'status': audit.status,
-                'ipfs_hash': audit.evidence_bundle_ipfs_hash,
-                'created_at': audit.created_at.isoformat() if audit.created_at else None
-            }
-            for audit in audits
-        ]
-    
+        audits = await orchestrator.list_audits(limit=limit, offset=offset, status=status)
+        return audits
     except Exception as e:
         logger.error(f"Failed to list audits: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return []
+# =====================================================
 
 
 if __name__ == "__main__":

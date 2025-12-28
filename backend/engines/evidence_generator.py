@@ -8,6 +8,7 @@ import time
 from typing import Dict, Any
 from eth_account.messages import encode_defunct
 import logging
+import numpy as np
 
 from backend.config import settings
 from backend.web3_client import web3_client
@@ -52,7 +53,17 @@ class EvidenceBundleGenerator:
         """
         logger.info(f"Generating evidence bundle for audit {audit_id}")
         
-        # Create bundle structure
+        # Convert similarity matrix to serializable format
+        similarity_matrix = poi_result.get('similarity_matrix')
+        if similarity_matrix is not None:
+            if isinstance(similarity_matrix, np.ndarray):
+                similarity_matrix = similarity_matrix.tolist()
+            elif isinstance(similarity_matrix, list):
+                # Convert any numpy values in the list
+                similarity_matrix = [[float(x) if isinstance(x, (np.floating, np.integer)) else x 
+                                     for x in row] for row in similarity_matrix]
+        
+        # Create bundle structure with JSON-serializable data
         bundle = {
             "version": "1.0",
             "audit_id": audit_id,
@@ -64,28 +75,28 @@ class EvidenceBundleGenerator:
                 "category": "general"
             },
             "poi_validation": {
-                "session_id": poi_result.get('session_id'),
-                "task_id": poi_result.get('task_id'),
-                "similarity_score": poi_result.get('similarity_score'),
-                "threshold": poi_result.get('similarity_threshold'),
-                "passed": poi_result.get('passed'),
-                "num_nodes": poi_result.get('num_nodes'),
-                "consensus_output": poi_result.get('consensus_output'),
-                "outliers": poi_result.get('outliers', []),
-                "similarity_matrix": poi_result.get('similarity_matrix')
+                "session_id": self._to_json_safe(poi_result.get('session_id')),
+                "task_id": self._to_json_safe(poi_result.get('task_id')),
+                "similarity_score": float(poi_result.get('similarity_score', 0.0)),
+                "threshold": float(poi_result.get('similarity_threshold', 0.0)),
+                "passed": bool(poi_result.get('passed', False)),
+                "num_nodes": int(poi_result.get('num_nodes', 0)),
+                "consensus_output": str(poi_result.get('consensus_output', '')),
+                "outliers": [str(x) for x in poi_result.get('outliers', [])],
+                "similarity_matrix": similarity_matrix
             },
             "pouw_validation": {
-                "session_id": pouw_result.get('session_id'),
-                "overall_score": pouw_result.get('overall_score'),
-                "overall_score_raw": pouw_result.get('overall_score_raw'),
-                "passed": pouw_result.get('passed'),
-                "num_validators": pouw_result.get('num_validators'),
-                "criterion_scores": pouw_result.get('criterion_scores', {})
+                "session_id": self._to_json_safe(pouw_result.get('session_id')),
+                "overall_score": float(pouw_result.get('overall_score', 0.0)),
+                "overall_score_raw": float(pouw_result.get('overall_score_raw', 0.0)),
+                "passed": bool(pouw_result.get('passed', False)),
+                "num_validators": int(pouw_result.get('num_validators', 0)),
+                "criterion_scores": self._convert_criterion_scores(pouw_result.get('criterion_scores', {}))
             },
             "final_assessment": {
-                "confidence_score": final_confidence,
-                "poi_weight": settings.pouw_confidence_weight_poi,
-                "pouw_weight": settings.pouw_confidence_weight_pouw,
+                "confidence_score": float(final_confidence),
+                "poi_weight": float(settings.pouw_confidence_weight_poi),
+                "pouw_weight": float(settings.pouw_confidence_weight_pouw),
                 "calculation": f"{settings.pouw_confidence_weight_poi} * {poi_result.get('similarity_score', 0):.3f} + {settings.pouw_confidence_weight_pouw} * {pouw_result.get('overall_score', 0):.3f}"
             },
             "metadata": {
@@ -107,6 +118,33 @@ class EvidenceBundleGenerator:
         logger.info(f"Bundle generated: hash={bundle_hash[:16]}...")
         
         return bundle
+    
+    def _to_json_safe(self, value: Any) -> Any:
+        """Convert value to JSON-safe type"""
+        if value is None:
+            return None
+        if isinstance(value, (np.integer, np.floating)):
+            return float(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        return value
+    
+    def _convert_criterion_scores(self, scores: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert criterion scores to JSON-serializable format"""
+        result = {}
+        for key, value in scores.items():
+            if isinstance(value, dict):
+                result[key] = {
+                    "scores": [float(s) for s in value.get("scores", [])],
+                    "average": float(value.get("average", 0.0)),
+                    "min": float(value.get("min", 0.0)),
+                    "max": float(value.get("max", 0.0))
+                }
+            else:
+                result[key] = float(value) if isinstance(value, (int, float, np.integer, np.floating)) else value
+        return result
     
     def _sign_bundle(self, bundle_hash: str) -> str:
         """

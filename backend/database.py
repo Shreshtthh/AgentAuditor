@@ -1,60 +1,54 @@
 """
-Database connection and session management
+Database configuration and session management
 """
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+import os
 from contextlib import contextmanager
-import logging
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 
 from backend.config import settings
-from backend.models import Base
 
-logger = logging.getLogger(__name__)
+# Create database directory if needed
+db_path = settings.database_url.replace("sqlite:///", "")
+if db_path.startswith("./"):
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
 
-# Create database engine
+# Create engine
 engine = create_engine(
     settings.database_url,
-    echo=settings.log_level == "DEBUG",
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20
+    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {}
 )
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Create base class for models
+Base = declarative_base()
+
 
 def init_db():
-    """Initialize database - create all tables"""
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("Database tables created successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
+    """Initialize database tables"""
+    # Import models to register them with Base
+    from backend.models import Agent, Audit
+    Base.metadata.create_all(bind=engine)
+    print("Database tables created successfully")
 
 
 @contextmanager
-def get_db() -> Session:
-    """
-    Dependency for getting database sessions
-    Usage:
-        with get_db() as db:
-            db.query(...)
-    """
+def get_db_session():
+    """Get database session as context manager"""
     db = SessionLocal()
     try:
         yield db
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
     finally:
         db.close()
 
 
-def get_db_session():
-    """FastAPI dependency for route handlers"""
+def get_db():
+    """Dependency for FastAPI to get DB session"""
     db = SessionLocal()
     try:
         yield db
