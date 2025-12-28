@@ -9,6 +9,8 @@
 
 ---
 
+Video Demo - https://youtu.be/GhqxvqlBqbM
+
 ## 🎯 The Problem: The AI Trust Gap
 
 As decentralized AI scales toward enterprise adoption, three critical barriers emerge:
