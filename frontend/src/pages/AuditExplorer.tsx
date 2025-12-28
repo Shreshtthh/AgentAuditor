@@ -16,7 +16,6 @@ import {
   Copy,
   Check,
   X,
-  Loader2,
   RefreshCw
 } from 'lucide-react'
 
