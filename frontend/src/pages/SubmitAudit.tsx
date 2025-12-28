@@ -19,11 +19,13 @@ import {
 
 interface AuditResult {
   audit_id: string
-  confidence_score: number
-  poi_similarity: number
-  pouw_mean_score: number
-  ipfs_hash: string
-  evidence_cid?: string
+  agent_id: string
+  status: string
+  confidence_score: number | null
+  poi_similarity: number | null
+  pouw_mean_score: number | null
+  ipfs_hash: string | null
+  error?: string
 }
 
 const categories = [
@@ -33,23 +35,25 @@ const categories = [
   { value: 'reasoning', label: 'Reasoning', icon: '🧠', desc: 'Logic & problem solving' },
 ]
 
-function ScoreBar({ label, value, color }: { label: string; value: number; color: string }) {
-  const percentage = value * 100
+function ScoreBar({ label, value, color }: { label: string; value: number | null; color: string }) {
+  const percentage = (value || 0) * 100
+  const displayValue = isNaN(percentage) ? 0 : percentage
+  
   return (
     <div className="space-y-2">
       <div className="flex justify-between text-sm">
         <span className="font-medium text-slate-700 dark:text-slate-300">{label}</span>
-        <span className={`font-bold ${color}`}>{percentage.toFixed(1)}%</span>
+        <span className={`font-bold ${color}`}>{displayValue.toFixed(1)}%</span>
       </div>
       <div className="h-2 bg-slate-200 dark:bg-dark-700 rounded-full overflow-hidden">
         <div 
           className={`h-full rounded-full transition-all duration-1000 ease-out bg-gradient-to-r ${
-            percentage >= 80 ? 'from-emerald-500 to-teal-400' :
-            percentage >= 60 ? 'from-primary-500 to-cyan-400' :
-            percentage >= 40 ? 'from-amber-500 to-yellow-400' :
+            displayValue >= 80 ? 'from-emerald-500 to-teal-400' :
+            displayValue >= 60 ? 'from-primary-500 to-cyan-400' :
+            displayValue >= 40 ? 'from-amber-500 to-yellow-400' :
             'from-red-500 to-orange-400'
           }`}
-          style={{ width: `${percentage}%` }}
+          style={{ width: `${displayValue}%` }}
         />
       </div>
     </div>
@@ -80,15 +84,26 @@ export default function SubmitAudit() {
     // Simulate progress steps
     const stepInterval = setInterval(() => {
       setStep(prev => prev < 4 ? prev + 1 : prev)
-    }, 1500)
+    }, 2000)
 
     try {
-      const response = await axios.post('/api/v1/audit', formData)
-      setResult(response.data)
+      const response = await axios.post('/api/v1/audit', formData, {
+        timeout: 600000 // 10 minute timeout
+      })
+      
+      const data = response.data
+      
+      // Check if audit failed
+      if (data.status === 'failed' || data.error) {
+        throw new Error(data.error || 'Audit failed')
+      }
+      
+      setResult(data)
       setStep(5)
     } catch (err: any) {
       console.error('Audit failed:', err)
-      setError(err.response?.data?.detail || 'Audit failed. Please try again.')
+      const errorMessage = err.response?.data?.error || err.response?.data?.detail || err.message || 'Audit failed. Please try again.'
+      setError(errorMessage)
       setStep(0)
     } finally {
       clearInterval(stepInterval)
@@ -110,7 +125,8 @@ export default function SubmitAudit() {
     { label: 'Complete', icon: CheckCircle2 },
   ]
 
-  const getScoreColor = (score: number) => {
+  const getScoreColor = (score: number | null) => {
+    if (score === null || isNaN(score)) return 'text-slate-400'
     const pct = score * 100
     if (pct >= 80) return 'text-emerald-600 dark:text-emerald-400'
     if (pct >= 60) return 'text-primary-600 dark:text-primary-400'
@@ -179,7 +195,7 @@ export default function SubmitAudit() {
                 value={formData.task_description}
                 onChange={(e) => setFormData({ ...formData, task_description: e.target.value })}
                 className="w-full px-4 py-3 bg-slate-50 dark:bg-dark-800 border border-slate-200 dark:border-dark-700 rounded-xl focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 dark:focus:border-primary-500 outline-none transition-all text-slate-900 dark:text-white placeholder-slate-400"
-                placeholder="Write a Python function to reverse a string"
+                placeholder="Write ONLY a Python function named is_prime(n)"
               />
             </div>
 
@@ -196,7 +212,7 @@ export default function SubmitAudit() {
                 value={formData.task_input}
                 onChange={(e) => setFormData({ ...formData, task_input: e.target.value })}
                 className="w-full px-4 py-3 bg-slate-50 dark:bg-dark-800 border border-slate-200 dark:border-dark-700 rounded-xl focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500 dark:focus:border-primary-500 outline-none transition-all text-slate-900 dark:text-white placeholder-slate-400 resize-none"
-                placeholder="Write a Python function that takes a string as input and returns the reversed string. Include proper error handling and type hints..."
+                placeholder="17"
               />
             </div>
 
@@ -237,7 +253,7 @@ export default function SubmitAudit() {
             {error && (
               <div className="flex items-start gap-3 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-xl animate-slide-up">
                 <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
-                <div>
+                <div className="flex-1">
                   <h4 className="font-semibold text-red-700 dark:text-red-400">Audit Failed</h4>
                   <p className="text-sm text-red-600 dark:text-red-300 mt-1">{error}</p>
                 </div>
@@ -313,7 +329,7 @@ export default function SubmitAudit() {
           )}
 
           {/* Result */}
-          {result && (
+          {result && result.status === 'completed' && (
             <div className="glass-card rounded-2xl p-6 animate-slide-up">
               <div className="flex items-center gap-3 mb-6">
                 <div className="p-2 bg-emerald-500/10 dark:bg-emerald-500/20 rounded-lg">
@@ -335,7 +351,7 @@ export default function SubmitAudit() {
                   Confidence Score
                 </div>
                 <div className={`text-4xl font-bold ${getScoreColor(result.confidence_score)}`}>
-                  {(result.confidence_score * 100).toFixed(1)}%
+                  {((result.confidence_score || 0) * 100).toFixed(1)}%
                 </div>
               </div>
 

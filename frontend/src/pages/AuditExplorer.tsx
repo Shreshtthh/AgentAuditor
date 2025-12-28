@@ -27,10 +27,16 @@ interface Audit {
   task_description: string
   confidence_score: number
   poi_similarity: number
-  pouw_mean_score: number
+  pouw_score: number  // Changed from pouw_mean_score
   ipfs_hash?: string
   created_at: string
   status: string
+}
+
+// Update the interface to match the API response
+interface AuditListResponse {
+  total: number
+  audits: Audit[]
 }
 
 function Skeleton({ className }: { className?: string }) {
@@ -171,18 +177,18 @@ function AuditRow({ audit, index }: { audit: Audit; index: number }) {
                 <div>
                   <div className="flex justify-between text-sm mb-1">
                     <span className="text-slate-500 dark:text-slate-400">PoUW Score</span>
-                    <span className={`font-semibold ${getScoreColor(audit.pouw_mean_score)}`}>
-                      {(audit.pouw_mean_score * 100).toFixed(1)}%
+                    <span className={`font-semibold ${getScoreColor(audit.pouw_score || 0)}`}>
+                      {((audit.pouw_score || 0) * 100).toFixed(1)}%
                     </span>
                   </div>
                   <div className="h-1.5 bg-slate-200 dark:bg-dark-700 rounded-full overflow-hidden">
                     <div 
                       className={`h-full rounded-full bg-gradient-to-r ${
-                        audit.pouw_mean_score >= 0.8 ? 'from-emerald-500 to-teal-400' :
-                        audit.pouw_mean_score >= 0.6 ? 'from-primary-500 to-cyan-400' :
+                        (audit.pouw_score || 0) >= 0.8 ? 'from-emerald-500 to-teal-400' :
+                        (audit.pouw_score || 0) >= 0.6 ? 'from-primary-500 to-cyan-400' :
                         'from-amber-500 to-yellow-400'
                       }`}
-                      style={{ width: `${audit.pouw_mean_score * 100}%` }}
+                      style={{ width: `${(audit.pouw_score || 0) * 100}%` }}
                     />
                   </div>
                 </div>
@@ -258,15 +264,18 @@ export default function AuditExplorer() {
   const [filterOpen, setFilterOpen] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string>('all')
 
-  const { data: audits, isLoading, refetch, isRefetching } = useQuery({
+  // Update the query to handle the correct response structure
+  const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['audits'],
     queryFn: async () => {
-      // This would call the real API
-      const response = await axios.get('/api/v1/audits?limit=50')
-      return response.data as Audit[]
+      const response = await axios.get<AuditListResponse>('/api/v1/audits?limit=50')
+      return response.data
     },
     retry: false
   })
+
+  // Extract the audits array
+  const audits = data?.audits
 
   const filteredAudits = audits?.filter((audit: Audit) => {
     const matchesSearch = 
@@ -418,7 +427,7 @@ export default function AuditExplorer() {
       {/* Results count */}
       {!isLoading && filteredAudits && (
         <div className="mt-4 text-sm text-slate-500 dark:text-slate-400 text-center">
-          Showing {filteredAudits.length} of {audits?.length || 0} audits
+          Showing {filteredAudits.length} of {data?.total || 0} audits
         </div>
       )}
     </div>
