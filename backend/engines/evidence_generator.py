@@ -12,6 +12,7 @@ import numpy as np
 
 from backend.config import settings
 from backend.web3_client import web3_client
+from backend.engines.ipfs_client import ipfs_client
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,19 @@ class EvidenceBundleGenerator:
         signature = self._sign_bundle(bundle_hash)
         bundle['signature'] = signature
         
+        # Upload to IPFS if configured
+        ipfs_cid = None
+        if settings.pinata_api_key:
+            try:
+                ipfs_cid = ipfs_client.upload_bundle(bundle)
+                logger.info(f"Evidence uploaded to IPFS: {ipfs_cid}")
+            except Exception as e:
+                logger.warning(f"IPFS upload failed: {e}")
+        else:
+            logger.info("IPFS not configured, skipping upload")
+        
+        bundle['ipfs_cid'] = ipfs_cid
+        
         logger.info(f"Bundle generated: hash={bundle_hash[:16]}...")
         
         return bundle
@@ -189,6 +203,7 @@ class EvidenceBundleGenerator:
             bundle_copy = bundle.copy()
             bundle_copy.pop('signature', None)
             bundle_copy.pop('bundle_hash', None)
+            bundle_copy.pop('ipfs_cid', None)  # Don't include IPFS CID in hash verification
             
             bundle_json = json.dumps(bundle_copy, sort_keys=True)
             actual_hash = hashlib.sha256(bundle_json.encode()).hexdigest()
