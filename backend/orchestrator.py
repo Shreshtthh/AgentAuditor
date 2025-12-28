@@ -164,16 +164,25 @@ class AuditOrchestrator:
     
     def _build_agent_prompt(self, task_description: str, task_input: str) -> str:
         """Build the full prompt to send to the agent"""
+        # Enhanced prompt with clearer instructions for code generation
+        system_context = """You are an AI assistant that follows instructions precisely.
+If asked to write code, respond with ONLY the code - no explanations, no markdown formatting, no comments unless specifically requested.
+If given an input value, use it as a test case reference but still provide the complete solution as requested."""
+        
         if task_input and task_input.strip():
-            return f"""{task_description}
+            return f"""{system_context}
 
-Input: {task_input}
+Task: {task_description}
 
-Please provide your response:"""
+Example Input: {task_input}
+
+Output:"""
         else:
-            return f"""{task_description}
+            return f"""{system_context}
 
-Please provide your response:"""
+Task: {task_description}
+
+Output:"""
     
     def _ensure_agent_exists(self, agent_id: str, agent_name: Optional[str]):  # REMOVED async
         """Ensure agent exists in database"""
