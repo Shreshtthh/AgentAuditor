@@ -405,7 +405,7 @@ export default function AgentProfile() {
             <StatCard
               icon={TrendingUp}
               label="Success Rate"
-              value={`${((agent.success_rate || 0.85) * 100).toFixed(0)}%`}
+              value={`${((agent.success_rate || 0.6) * 100).toFixed(0)}%`}
               subValue="last 30 days"
               color="from-amber-500 to-orange-500"
               trend="up"
