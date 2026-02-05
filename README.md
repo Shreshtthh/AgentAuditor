@@ -495,11 +495,4 @@ MIT License - See `LICENSE` file for details
 
 ---
 
-## 📞 Contact
-
-- **GitHub**: [github.com/yourusername/AgentAuditor](https://github.com/Shreshtthh/AgentAuditor)
-- **Demo Video**: [Link to demo]
-
----
-
 **Built with ❤️ for the Cortensor Hackathon**
